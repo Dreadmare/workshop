@@ -1,0 +1,7 @@
+*.obj
+*.exe
+*.pdb
+*.log
+*.vcxproj
+.vs/
+bin/

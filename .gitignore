@@ -1,0 +1,12 @@
+# Visual Studio / Build outputs
+bin/
+obj/
+x64/
+x86/
+
+# NuGet Packages
+packages/
+
+# User-specific files
+*.user
+*.suo
