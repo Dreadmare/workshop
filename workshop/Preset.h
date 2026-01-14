@@ -8,8 +8,12 @@ class Preset {
 public:
     Preset(DatabaseManager* db);
 
-    void savePreset(const std::string& id, const std::string& name, const std::string& terrain, const std::string& climate);
-    bool loadPreset(const std::string& name, std::string& terrainOut, std::string& climateOut);
+    void savePreset(const std::string& name, double gradient, double roughness, double temperature);
+
+    bool loadPreset(const std::string& name, double& gradOut, double& roughOut, double& tempOut);
+
+    bool deletePreset(const std::string& name);
+
     void listPresets();
 
 private:

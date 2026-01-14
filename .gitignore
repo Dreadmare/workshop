@@ -3,6 +3,8 @@ bin/
 obj/
 x64/
 x86/
+.vs/
+*.ipch
 
 # NuGet Packages
 packages/

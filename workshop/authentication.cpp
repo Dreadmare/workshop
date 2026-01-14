@@ -1,71 +1,71 @@
-#include "Auth.h"
+﻿#include "Auth.h"
 #include <iostream>
-#include <vector>
+#include <windows.h>
 #include <cstring>
 #include <iomanip>
+#include <functional> // std::hash
 #include <sstream>
-#include <random>
+#include <iomanip>
 
 Auth::Auth(DatabaseManager* db) : db(db) {}
 
-// Constant-time comparison to prevent timing attacks
-bool Auth::security_compare(const std::string& a, const std::string& b) {
-    if (a.length() != b.length()) return false;
-    unsigned char result = 0;
-    for (size_t i = 0; i < a.length(); ++i) {
-        result |= (static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]));
-    }
-    return result == 0;
-}
-
-std::string Auth::kdfHash(const std::string& password, const std::string& salt, int iterations) {
-    std::string hash = password + salt;
-    for (int i = 0; i < iterations; ++i) {
-        hash += std::to_string(i);
-    }
-    return hash.substr(0, 64);
-}
-
+// password verification
 bool Auth::verify(const std::string& username, const std::string& password) {
-    MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
-    const char* query = "SELECT password_hash, salt FROM users WHERE username = ? LIMIT 1";
+    if (!db || !db->getConnection()) {
+        std::cerr << "Database connection not available.\n";
+        return false;
+    }
 
-    if (mysql_stmt_prepare(stmt, query, strlen(query)) != 0) return false;
+    MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
+    const char* query = "SELECT password_hash FROM users WHERE username = ? LIMIT 1";
+
+    if (mysql_stmt_prepare(stmt, query, (unsigned long)strlen(query)) != 0) {
+        std::cerr << "Failed to prepare verification statement.\n";
+        return false;
+    }
 
     MYSQL_BIND bind[1];
     memset(bind, 0, sizeof(bind));
     bind[0].buffer_type = MYSQL_TYPE_STRING;
     bind[0].buffer = (char*)username.c_str();
-    bind[0].buffer_length = username.length();
+    bind[0].buffer_length = (unsigned long)username.length();
 
-    mysql_stmt_bind_param(stmt, bind);
-    mysql_stmt_execute(stmt);
+    if (mysql_stmt_bind_param(stmt, bind) != 0) {
+        std::cerr << "Failed to bind parameters for verification.\n";
+        mysql_stmt_close(stmt);
+        return false;
+    }
 
-    // Bind results
-    char h_buf[65], s_buf[33];
-    unsigned long h_len, s_len;
-    MYSQL_BIND res_bind[2];
+    if (mysql_stmt_execute(stmt) != 0) {
+        std::cerr << "Failed to execute verification statement.\n";
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    char stored_hash[256];
+    unsigned long hash_length = 0;
+    MYSQL_BIND res_bind[1];
     memset(res_bind, 0, sizeof(res_bind));
-
     res_bind[0].buffer_type = MYSQL_TYPE_STRING;
-    res_bind[0].buffer = h_buf;
-    res_bind[0].buffer_length = sizeof(h_buf);
-    res_bind[0].length = &h_len;
+    res_bind[0].buffer = stored_hash;
+    res_bind[0].buffer_length = sizeof(stored_hash);
+    res_bind[0].length = &hash_length;
 
-    res_bind[1].buffer_type = MYSQL_TYPE_STRING;
-    res_bind[1].buffer = s_buf;
-    res_bind[1].buffer_length = sizeof(s_buf);
-    res_bind[1].length = &s_len;
-
-    mysql_stmt_bind_result(stmt, res_bind);
+    if (mysql_stmt_bind_result(stmt, res_bind) != 0) {
+        std::cerr << "Failed to bind result for verification.\n";
+        mysql_stmt_close(stmt);
+        return false;
+    }
 
     bool authenticated = false;
-    if (mysql_stmt_fetch(stmt) == 0) {
-        std::string storedHash(h_buf, h_len);
-        std::string salt(s_buf, s_len);
 
-        std::string candidateHash = kdfHash(password, salt, 100000);
-        if (security_compare(candidateHash, storedHash)) {
+    if (mysql_stmt_fetch(stmt) == 0) {
+        // hash the input password - use plain text
+        std::string storedPassword(stored_hash, hash_length);
+
+        std::string input_hash = password;
+
+        if (password == storedPassword) {
             authenticated = true;
         }
     }
@@ -73,115 +73,470 @@ bool Auth::verify(const std::string& username, const std::string& password) {
     mysql_stmt_close(stmt);
     return authenticated;
 }
-void setEcho(bool enable) {
-    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode;
-    GetConsoleMode(hStdin, &mode);
 
-    if (!enable) {
-        mode &= ~ENABLE_ECHO_INPUT; // Turn off echo
-    }
-    else {
-        mode |= ENABLE_ECHO_INPUT;  // Turn on echo
-    }
+// check if user exist in database
+bool Auth::userExists(const std::string& username) {
+    if (!db || !db->getConnection()) return false;
 
-    SetConsoleMode(hStdin, mode);
-}
-
-bool Auth::login(std::string& loggedInUser) {
-    std::string u, p;
-    std::cout << "--- Tactical Login ---\nUsername: ";
-    std::cin >> u;
-    std::cout << "Password: ";
-
-    setEcho(false);
-    std::cin >> p;
-    setEcho(true);
-
-    if (verify(u, p)) {
-        loggedInUser = u;
-        std::cout << "Access Granted. Welcome, " << u << ".\n";
-        return true;
-    }
-    else {
-        std::cout << "Access Denied.\n";
-        return false;
-    }
-}
-
-bool Auth::passwordPolicy(const std::string& pw) {
-    if (pw.length() < 12) return false;
-    bool hasUpper = false, hasLower = false, hasDigit = false;
-    for (char c : pw) {
-        if (isupper(c)) hasUpper = true;
-        if (islower(c)) hasLower = true;
-        if (isdigit(c)) hasDigit = true;
-    }
-    return hasUpper && hasLower && hasDigit;
-}
-
-std::string Auth::generateSalt(std::size_t length) {
-    const char charset[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    std::string salt;
-    std::random_device rd;
-    std::mt19937 generator(rd());
-    std::uniform_int_distribution<> dist(0, sizeof(charset) - 2);
-
-    for (std::size_t i = 0; i < length; ++i) {
-        salt += charset[dist(generator)];
-    }
-    return salt;
-}
-
-bool Auth::registerUser(const std::string& username, const std::string& password, Role role) {
-    // Validate Password Strength
-    if (!passwordPolicy(password)) {
-        std::cout << "Registration failed: Password does not meet security policy (min 12 chars, upper, lower, digit).\n";
-        return false;
-    }
-    // Unique salt
-    std::string salt = generateSalt(16);
-
-    // Has
-    std::string passwordHash = kdfHash(password, salt, 100000);
-
-    // Insert into DB with Prepared Statements to prevent SQL injections
     MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
-    const char* sql = "INSERT INTO users (username, password_hash, salt, role) VALUES (?, ?, ?, ?)";
+    const char* query = "SELECT COUNT(*) FROM users WHERE username = ?";
 
-    if (mysql_stmt_prepare(stmt, sql, strlen(sql)) == 0) {
-        MYSQL_BIND bind[4];
+    if (mysql_stmt_prepare(stmt, query, (unsigned long)strlen(query)) != 0) return false;
+
+    MYSQL_BIND bind[1];
+    memset(bind, 0, sizeof(bind));
+    bind[0].buffer_type = MYSQL_TYPE_STRING;
+    bind[0].buffer = (char*)username.c_str();
+    bind[0].buffer_length = (unsigned long)username.length();
+
+    if (mysql_stmt_bind_param(stmt, bind) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    if (mysql_stmt_execute(stmt) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    int count = 0;
+    MYSQL_BIND res_bind[1];
+    memset(res_bind, 0, sizeof(res_bind));
+    res_bind[0].buffer_type = MYSQL_TYPE_LONG;
+    res_bind[0].buffer = &count;
+
+    if (mysql_stmt_bind_result(stmt, res_bind) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    if (mysql_stmt_fetch(stmt) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    mysql_stmt_close(stmt);
+    return (count > 0);
+}
+
+// add a new user to database
+bool Auth::registerUser(const std::string& username, const std::string& password, Role role) {
+    if (!db || !db->getConnection()) {
+        std::cerr << "Database connection not available.\n";
+        return false;
+    }
+
+    // Validate username
+    if (username.empty() || username.length() < 3 || username.length() > 20) {
+        std::cerr << "Username must be 3-20 characters.\n";
+        return false;
+    }
+
+    // Check for invalid characters in username
+    for (char c : username) {
+        if (!isalnum(c) && c != '_' && c != '-') {
+            std::cerr << "Username can only contain letters, numbers, underscore and hyphen.\n";
+            return false;
+        }
+    }
+
+    // Validate password
+    if (password.length() < 6) {
+        std::cerr << "Password must be at least 6 characters.\n";
+        return false;
+    }
+
+    // Check if user already exists
+    if (userExists(username)) {
+        std::cerr << "User '" << username << "' already exists.\n";
+        return false;
+    }
+
+    MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
+
+    // Use ENUM strings 'admin' or 'user'
+    const char* sql = "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)";
+
+    if (mysql_stmt_prepare(stmt, sql, (unsigned long)strlen(sql)) == 0) {
+        MYSQL_BIND bind[3];
         memset(bind, 0, sizeof(bind));
 
+        // Username
         bind[0].buffer_type = MYSQL_TYPE_STRING;
         bind[0].buffer = (char*)username.c_str();
-        bind[0].buffer_length = username.length();
+        bind[0].buffer_length = (unsigned long)username.length();
 
+        // Password - store as plain text
         bind[1].buffer_type = MYSQL_TYPE_STRING;
-        bind[1].buffer = (char*)passwordHash.c_str();
-        bind[1].buffer_length = passwordHash.length();
+        bind[1].buffer = (char*)password.c_str();
+        bind[1].buffer_length = (unsigned long)password.length();
 
+        std::string roleStr = roleToString(role);
         bind[2].buffer_type = MYSQL_TYPE_STRING;
-        bind[2].buffer = (char*)salt.c_str();
-        bind[2].buffer_length = salt.length();
+        bind[2].buffer = (char*)roleStr.c_str();
+        bind[2].buffer_length = (unsigned long)roleStr.length();
 
-        // 1 = admin, 0 = user
-        int roleInt = (role == Role::ADMIN) ? 1 : 0;
-        bind[3].buffer_type = MYSQL_TYPE_LONG;
-        bind[3].buffer = (char*)&roleInt;
-
-        mysql_stmt_bind_param(stmt, bind);
-
-        if (mysql_stmt_execute(stmt) == 0) {
-            std::cout << "User '" << username << "' registered successfully.\n";
+        if (mysql_stmt_bind_param(stmt, bind) != 0) {
+            std::cerr << "Failed to bind parameters for registration.\n";
             mysql_stmt_close(stmt);
+            return false;
+        }
+
+        bool success = (mysql_stmt_execute(stmt) == 0);
+        mysql_stmt_close(stmt);
+
+        if (success) {
+            std::cout << "✓ User '" << username << "' registered successfully as "
+                << roleStr << ".\n";
             return true;
         }
         else {
-            std::cerr << "Registration Error: " << mysql_stmt_error(stmt) << "\n";
+            std::cerr << "✗ Failed to register user.\n";
+            return false;
         }
+    }
+
+    std::cerr << "Failed to prepare registration statement.\n";
+    mysql_stmt_close(stmt);
+    return false;
+}
+
+// login system
+bool Auth::login(std::string& loggedInUser, Role& loggedInRole) {
+    if (!db || !db->getConnection()) {
+        std::cerr << "Database connection not available.\n";
+        return false;
+    }
+
+    std::string u, p;
+    std::cout << "Username: ";
+    std::cin >> u;
+    std::cout << "Password: ";
+    setEcho(false);
+    std::cin >> p;
+    setEcho(true);
+    std::cout << std::endl;
+
+    if (verify(u, p)) {
+        loggedInUser = u;
+
+        // Get user role
+        if (getUserRole(u, loggedInRole)) {
+            std::cout << "Welcome, " << u << "! (" << roleToString(loggedInRole) << ")\n";
+            return true;
+        }
+    }
+    std::cout << "Invalid credentials.\n";
+    return false;
+}
+
+// update user profile in database
+bool Auth::updateUser(const std::string& currentUser, Role currentRole,const std::string& targetUser, const std::string& newPassword) {
+
+    if (!db || !db->getConnection()) {
+        std::cerr << "Database connection not available.\n";
+        return false;
+    }
+
+    // Check permissions
+    if (currentRole != Role::ADMIN && currentUser != targetUser) {
+        std::cerr << "Permission denied: Users can only update their own profile.\n";
+        return false;
+    }
+
+    // Check if target user exists
+    if (!userExists(targetUser)) {
+        std::cerr << "User '" << targetUser << "' does not exist.\n";
+        return false;
+    }
+
+    MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
+    const char* sql = "UPDATE users SET password_hash = ? WHERE username = ?";
+
+    if (mysql_stmt_prepare(stmt, sql, (unsigned long)strlen(sql)) == 0) {
+        MYSQL_BIND bind[2];
+        memset(bind, 0, sizeof(bind));
+
+        bind[0].buffer_type = MYSQL_TYPE_STRING;
+        bind[0].buffer = (char*)newPassword.c_str();
+        bind[0].buffer_length = (unsigned long)newPassword.length();
+
+        // Target username
+        bind[1].buffer_type = MYSQL_TYPE_STRING;
+        bind[1].buffer = (char*)targetUser.c_str();
+        bind[1].buffer_length = (unsigned long)targetUser.length();
+
+        if (mysql_stmt_bind_param(stmt, bind) != 0) {
+            std::cerr << "Failed to bind parameters for update.\n";
+            mysql_stmt_close(stmt);
+            return false;
+        }
+
+        if (mysql_stmt_execute(stmt) == 0) {
+            int affected = (int)mysql_stmt_affected_rows(stmt);
+            mysql_stmt_close(stmt);
+
+            if (affected > 0) {
+                std::cout << "User '" << targetUser << "' password updated successfully.\n";
+                return true;
+            }
+        }
+    }
+
+    std::cerr << "Failed to update user '" << targetUser << "'.\n";
+    mysql_stmt_close(stmt);
+    return false;
+}
+
+// delete user from database
+bool Auth::deleteUser(const std::string& currentUser, Role currentRole, const std::string& targetUser) {
+    if (!db || !db->getConnection()) {
+        std::cerr << "Database connection not available.\n";
+        return false;
+    }
+
+    // Check permissions
+    if (currentRole != Role::ADMIN && currentUser != targetUser) {
+        std::cerr << "Permission denied: Users can only delete their own account.\n";
+        return false;
+    }
+
+    // Check if target user exists
+    if (!userExists(targetUser)) {
+        std::cerr << "User '" << targetUser << "' does not exist.\n";
+        return false;
+    }
+
+    // Confirmation for deletion
+    std::cout << "Are you sure you want to delete user '" << targetUser << "'? (y/n): ";
+    char confirm;
+    std::cin >> confirm;
+    if (confirm != 'y' && confirm != 'Y') {
+        std::cout << "Deletion cancelled.\n";
+        return false;
+    }
+
+    MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
+    const char* sql = "DELETE FROM users WHERE username = ?";
+
+    if (mysql_stmt_prepare(stmt, sql, (unsigned long)strlen(sql)) == 0) {
+        MYSQL_BIND bind[1];
+        memset(bind, 0, sizeof(bind));
+
+        bind[0].buffer_type = MYSQL_TYPE_STRING;
+        bind[0].buffer = (char*)targetUser.c_str();
+        bind[0].buffer_length = (unsigned long)targetUser.length();
+
+        if (mysql_stmt_bind_param(stmt, bind) != 0) {
+            std::cerr << "Failed to bind parameters for deletion.\n";
+            mysql_stmt_close(stmt);
+            return false;
+        }
+
+        if (mysql_stmt_execute(stmt) == 0) {
+            int affected = (int)mysql_stmt_affected_rows(stmt);
+            mysql_stmt_close(stmt);
+
+            if (affected > 0) {
+                std::cout << "User '" << targetUser << "' deleted successfully.\n";
+                return true;
+            }
+        }
+    }
+
+    std::cerr << "Failed to delete user '" << targetUser << "'.\n";
+    mysql_stmt_close(stmt);
+    return false;
+}
+
+// get user role
+bool Auth::getUserRole(const std::string& username, Role& role) {
+    if (!db || !db->getConnection()) return false;
+
+    MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
+    const char* query = "SELECT role FROM users WHERE username = ?";
+
+    if (mysql_stmt_prepare(stmt, query, (unsigned long)strlen(query)) != 0) return false;
+
+    MYSQL_BIND bind[1];
+    memset(bind, 0, sizeof(bind));
+    bind[0].buffer_type = MYSQL_TYPE_STRING;
+    bind[0].buffer = (char*)username.c_str();
+    bind[0].buffer_length = (unsigned long)username.length();
+
+    if (mysql_stmt_bind_param(stmt, bind) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    if (mysql_stmt_execute(stmt) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    char role_buf[10];
+    unsigned long role_length = 0;
+    MYSQL_BIND res_bind[1];
+    memset(res_bind, 0, sizeof(res_bind));
+    res_bind[0].buffer_type = MYSQL_TYPE_STRING;
+    res_bind[0].buffer = role_buf;
+    res_bind[0].buffer_length = sizeof(role_buf);
+    res_bind[0].length = &role_length;
+
+    if (mysql_stmt_bind_result(stmt, res_bind) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    if (mysql_stmt_fetch(stmt) == 0) {
+        std::string roleStr(role_buf, role_length);
+        role = stringToRole(roleStr);
+        mysql_stmt_close(stmt);
+        return true;
     }
 
     mysql_stmt_close(stmt);
     return false;
+}
+
+// list all users
+bool Auth::listAllUsers(const std::string& adminUser, Role adminRole) {
+    if (!db || !db->getConnection()) {
+        std::cerr << "Database connection not available.\n";
+        return false;
+    }
+
+    // Check if caller is admin
+    if (adminRole != Role::ADMIN) {
+        std::cerr << "Permission denied: Only admins can list all users.\n";
+        return false;
+    }
+
+    MYSQL* conn = db->getConnection();
+
+    std::string query = "SELECT username, role FROM users ORDER BY username";
+
+    if (mysql_query(conn, query.c_str()) == 0) {
+        MYSQL_RES* res = mysql_store_result(conn);
+        if (res) {
+            std::cout << "\n=== All Registered Users ===\n";
+            std::cout << std::left << std::setw(20) << "Username"
+                << std::setw(10) << "Role"
+                << std::setw(10) << "Status"
+                << "\n";
+            std::cout << std::string(40, '-') << "\n";
+
+            MYSQL_ROW row;
+            while ((row = mysql_fetch_row(res))) {
+                std::string username = row[0] ? row[0] : "";
+                std::string roleStr = row[1] ? row[1] : "user";
+                std::string status = (username == adminUser) ? "(You)" : "";
+
+                std::cout << std::left << std::setw(20) << username
+                    << std::setw(10) << roleStr
+                    << std::setw(10) << status
+                    << "\n";
+            }
+
+            int count = mysql_num_rows(res);
+            std::cout << "\nTotal users: " << count << "\n";
+            mysql_free_result(res);
+            return true;
+        }
+    }
+
+    std::cerr << "Failed to list users: " << mysql_error(conn) << std::endl;
+    return false;
+}
+
+// update user's role
+bool Auth::changeUserRole(const std::string& adminUser, Role adminRole, const std::string& targetUser, Role newRole) {
+    if (!db || !db->getConnection()) {
+        std::cerr << "Database connection not available.\n";
+        return false;
+    }
+
+    // Check if caller is admin
+    if (adminRole != Role::ADMIN) {
+        std::cerr << "Permission denied: Only admins can change user roles.\n";
+        return false;
+    }
+
+    // Check if target user exists
+    if (!userExists(targetUser)) {
+        std::cerr << "User '" << targetUser << "' does not exist.\n";
+        return false;
+    }
+
+    if (adminUser == targetUser) {
+        std::cerr << "Cannot change your own role.\n";
+        return false;
+    }
+
+    MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
+    const char* sql = "UPDATE users SET role = ? WHERE username = ?";
+
+    if (mysql_stmt_prepare(stmt, sql, (unsigned long)strlen(sql)) == 0) {
+        MYSQL_BIND bind[2];
+        memset(bind, 0, sizeof(bind));
+
+        // New role as ENUM string
+        std::string roleStr = roleToString(newRole);
+        bind[0].buffer_type = MYSQL_TYPE_STRING;
+        bind[0].buffer = (char*)roleStr.c_str();
+        bind[0].buffer_length = (unsigned long)roleStr.length();
+
+        // Target username
+        bind[1].buffer_type = MYSQL_TYPE_STRING;
+        bind[1].buffer = (char*)targetUser.c_str();
+        bind[1].buffer_length = (unsigned long)targetUser.length();
+
+        if (mysql_stmt_bind_param(stmt, bind) != 0) {
+            std::cerr << "Failed to bind parameters for role change.\n";
+            mysql_stmt_close(stmt);
+            return false;
+        }
+
+        if (mysql_stmt_execute(stmt) == 0) {
+            int affected = (int)mysql_stmt_affected_rows(stmt);
+            mysql_stmt_close(stmt);
+
+            if (affected > 0) {
+                std::cout << "User '" << targetUser << "' role changed to "
+                    << roleStr << ".\n";
+                return true;
+            }
+        }
+    }
+
+    std::cerr << "Failed to change role for user '" << targetUser << "'.\n";
+    mysql_stmt_close(stmt);
+    return false;
+}
+
+// turn enum to string
+std::string Auth::roleToString(Role role) {
+    switch (role) {
+    case Role::ADMIN: return "admin";
+    case Role::USER: return "user";
+    default: return "user";
+    }
+}
+
+// turn string to enum
+Auth::Role Auth::stringToRole(const std::string& roleStr) {
+    if (roleStr == "admin") {
+        return Role::ADMIN;
+    }
+    return Role::USER;
+}
+
+// hide displayed text in Command Prompt
+void Auth::setEcho(bool enable) {
+    HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    GetConsoleMode(hStdin, &mode);
+    if (!enable) mode &= ~ENABLE_ECHO_INPUT;
+    else mode |= ENABLE_ECHO_INPUT;
+    SetConsoleMode(hStdin, mode);
 }

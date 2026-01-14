@@ -2,7 +2,6 @@
 #define AUTH_H
 
 #include <string>
-#include <chrono>
 #include "Database_Manager.h"
 
 class Auth {
@@ -11,18 +10,28 @@ public:
 
     Auth(DatabaseManager* db);
 
-    bool login(std::string& loggedInUser);
+    // Authentication
+    bool login(std::string& loggedInUser, Role& loggedInRole);
+
+    // Database operations
     bool registerUser(const std::string& username, const std::string& password, Role role = Role::USER);
+    bool updateUser(const std::string& currentUser, Role currentRole,const std::string& targetUser, const std::string& newPassword);
+    bool deleteUser(const std::string& currentUser, Role currentRole, const std::string& targetUser);
+    bool getUserRole(const std::string& username, Role& role);
 
     bool verify(const std::string& username, const std::string& password);
-    static std::string generateSalt(std::size_t length = 16);
-    static std::string kdfHash(const std::string& password, const std::string& salt, int iterations = 100000);
+    bool listAllUsers(const std::string& adminUser, Role adminRole);
+    bool changeUserRole(const std::string& adminUser, Role adminRole, const std::string& targetUser, Role newRole);
+
+    // Utility
+    static std::string roleToString(Role role);
+    static Role stringToRole(const std::string& roleStr);
+
+    // Helper
+    bool userExists(const std::string& username); 
 
 private:
     DatabaseManager* db;
-
-    static bool passwordPolicy(const std::string& pw);
-    static bool security_compare(const std::string& a, const std::string& b);
+    void setEcho(bool enable);
 };
-
 #endif
