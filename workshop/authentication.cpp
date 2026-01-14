@@ -61,14 +61,9 @@ bool Auth::verify(const std::string& username, const std::string& password) {
     bool authenticated = false;
 
     if (mysql_stmt_fetch(stmt) == 0) {
-        // hash the input password - use plain text
         std::string storedPassword(stored_hash, hash_length);
-
         std::string input_hash = password;
-
-        if (password == storedPassword) {
-            authenticated = true;
-        }
+        authenticated = verifyPassword(password, storedPassword);
     }
 
     mysql_stmt_close(stmt);
@@ -165,9 +160,13 @@ bool Auth::registerUser(const std::string& username, const std::string& password
         bind[0].buffer = (char*)username.c_str();
         bind[0].buffer_length = (unsigned long)username.length();
 
-        // Password - store as plain text
+        // Password - store as SHA-256
         bind[1].buffer_type = MYSQL_TYPE_STRING;
-        bind[1].buffer = (char*)password.c_str();
+        std::string salt = generateSalt();
+        std::string hashedPassword = hashPassword(password, salt);
+        std::string storedHash = salt + ":" + hashedPassword;
+        bind[1].buffer = (char*)storedHash.c_str();
+        bind[1].buffer_length = (unsigned long)storedHash.length();
         bind[1].buffer_length = (unsigned long)password.length();
 
         std::string roleStr = roleToString(role);
@@ -200,7 +199,6 @@ bool Auth::registerUser(const std::string& username, const std::string& password
     return false;
 }
 
-// login system
 bool Auth::login(std::string& loggedInUser, Role& loggedInRole) {
     if (!db || !db->getConnection()) {
         std::cerr << "Database connection not available.\n";
@@ -256,7 +254,11 @@ bool Auth::updateUser(const std::string& currentUser, Role currentRole,const std
         memset(bind, 0, sizeof(bind));
 
         bind[0].buffer_type = MYSQL_TYPE_STRING;
-        bind[0].buffer = (char*)newPassword.c_str();
+        std::string salt = generateSalt();
+        std::string hashedPassword = hashPassword(newPassword, salt);
+        std::string storedHash = salt + ":" + hashedPassword;
+        bind[0].buffer = (char*)storedHash.c_str();
+        bind[0].buffer_length = (unsigned long)storedHash.length();
         bind[0].buffer_length = (unsigned long)newPassword.length();
 
         // Target username
@@ -535,8 +537,10 @@ void Auth::setEcho(bool enable) {
 
 std::string Auth::generateSalt(size_t length) {
     HCRYPTPROV hProv = 0;
-    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
-        throw std::runtime_error("Unable to acquire crypto context");
+    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+            throw std::runtime_error("Unable to acquire crypto context");
+        }
     }
 
     std::vector<BYTE> saltBytes(length);
@@ -554,8 +558,10 @@ std::string Auth::hashPassword(const std::string& password, const std::string& s
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
 
-    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
-        throw std::runtime_error("Unable to acquire crypto context");
+    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+            throw std::runtime_error("Unable to acquire crypto context");
+        }
     }
 
     if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
