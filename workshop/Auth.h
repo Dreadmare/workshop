@@ -2,6 +2,7 @@
 #define AUTH_H
 
 #include <string>
+#include <vector>
 #include "Database_Manager.h"
 
 class Auth {
@@ -33,5 +34,10 @@ public:
 private:
     DatabaseManager* db;
     void setEcho(bool enable);
+    static std::string generateSalt(size_t length = 32);
+    static std::string hashPassword(const std::string& password, const std::string& salt);
+    static bool verifyPassword(const std::string& password, const std::string& storedHash);
+    static std::string bytesToHex(const unsigned char* bytes, size_t length);
+    static std::vector<unsigned char> hexToBytes(const std::string& hex);
 };
 #endif

@@ -1,13 +1,15 @@
-﻿#include "Auth.h"
+﻿#pragma comment(lib, "advapi32.lib")
+#include "Auth.h"
 #include <iostream>
 #include <windows.h>
+#include <wincrypt.h>
 #include <cstring>
 #include <iomanip>
-#include <functional> // std::hash
 #include <sstream>
 
 Auth::Auth(DatabaseManager* db) : db(db) {}
 
+// public functions
 // password verification
 bool Auth::verify(const std::string& username, const std::string& password) {
     if (!db || !db->getConnection()) {
@@ -73,7 +75,6 @@ bool Auth::verify(const std::string& username, const std::string& password) {
     return authenticated;
 }
 
-// check if user exist in database
 bool Auth::userExists(const std::string& username) {
     if (!db || !db->getConnection()) return false;
 
@@ -118,7 +119,6 @@ bool Auth::userExists(const std::string& username) {
     return (count > 0);
 }
 
-// add a new user to database
 bool Auth::registerUser(const std::string& username, const std::string& password, Role role) {
     if (!db || !db->getConnection()) {
         std::cerr << "Database connection not available.\n";
@@ -229,7 +229,6 @@ bool Auth::login(std::string& loggedInUser, Role& loggedInRole) {
     return false;
 }
 
-// update user profile in database
 bool Auth::updateUser(const std::string& currentUser, Role currentRole,const std::string& targetUser, const std::string& newPassword) {
 
     if (!db || !db->getConnection()) {
@@ -287,7 +286,6 @@ bool Auth::updateUser(const std::string& currentUser, Role currentRole,const std
     return false;
 }
 
-// delete user from database
 bool Auth::deleteUser(const std::string& currentUser, Role currentRole, const std::string& targetUser) {
     if (!db || !db->getConnection()) {
         std::cerr << "Database connection not available.\n";
@@ -348,7 +346,6 @@ bool Auth::deleteUser(const std::string& currentUser, Role currentRole, const st
     return false;
 }
 
-// get user role
 bool Auth::getUserRole(const std::string& username, Role& role) {
     if (!db || !db->getConnection()) return false;
 
@@ -398,7 +395,6 @@ bool Auth::getUserRole(const std::string& username, Role& role) {
     return false;
 }
 
-// list all users
 bool Auth::listAllUsers(const std::string& adminUser, Role adminRole) {
     if (!db || !db->getConnection()) {
         std::cerr << "Database connection not available.\n";
@@ -448,7 +444,6 @@ bool Auth::listAllUsers(const std::string& adminUser, Role adminRole) {
     return false;
 }
 
-// update user's role
 bool Auth::changeUserRole(const std::string& adminUser, Role adminRole, const std::string& targetUser, Role newRole) {
     if (!db || !db->getConnection()) {
         std::cerr << "Database connection not available.\n";
@@ -513,7 +508,6 @@ bool Auth::changeUserRole(const std::string& adminUser, Role adminRole, const st
     return false;
 }
 
-// turn enum to string
 std::string Auth::roleToString(Role role) {
     switch (role) {
     case Role::ADMIN: return "admin";
@@ -522,7 +516,6 @@ std::string Auth::roleToString(Role role) {
     }
 }
 
-// turn string to enum
 Auth::Role Auth::stringToRole(const std::string& roleStr) {
     if (roleStr == "admin") {
         return Role::ADMIN;
@@ -530,7 +523,7 @@ Auth::Role Auth::stringToRole(const std::string& roleStr) {
     return Role::USER;
 }
 
-// hide displayed text in Command Prompt
+// private functions
 void Auth::setEcho(bool enable) {
     HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode;
@@ -539,3 +532,96 @@ void Auth::setEcho(bool enable) {
     else mode |= ENABLE_ECHO_INPUT;
     SetConsoleMode(hStdin, mode);
 }
+
+std::string Auth::generateSalt(size_t length) {
+    HCRYPTPROV hProv = 0;
+    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        throw std::runtime_error("Unable to acquire crypto context");
+    }
+
+    std::vector<BYTE> saltBytes(length);
+    if (!CryptGenRandom(hProv, length, saltBytes.data())) {
+        CryptReleaseContext(hProv, 0);
+        throw std::runtime_error("Unable to generate salt");
+    }
+
+    CryptReleaseContext(hProv, 0);
+    return bytesToHex(saltBytes.data(), length);
+
+}
+
+std::string Auth::hashPassword(const std::string& password, const std::string& salt) {
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+
+    if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        throw std::runtime_error("Unable to acquire crypto context");
+    }
+
+    if (!CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+        CryptReleaseContext(hProv, 0);
+        throw std::runtime_error("Failed to create hash");
+    }
+
+    // Hash salt + password
+    std::string combined = salt + password;
+    if (!CryptHashData(hHash, (BYTE*)combined.c_str(), combined.length(), 0)) {
+        CryptDestroyHash(hHash);
+        CryptReleaseContext(hProv, 0);
+        throw std::runtime_error("Failed to hash data");
+    }
+
+    // Get hash value
+    DWORD hashLen = 32; // SHA-256 produces 32 bytes
+    BYTE hashValue[32];
+    DWORD dwHashLen = sizeof(hashValue);
+
+    if (!CryptGetHashParam(hHash, HP_HASHVAL, hashValue, &dwHashLen, 0)) {
+        CryptDestroyHash(hHash);
+        CryptReleaseContext(hProv, 0);
+        throw std::runtime_error("Failed to get hash value");
+    }
+
+    CryptDestroyHash(hHash);
+    CryptReleaseContext(hProv, 0);
+
+    return bytesToHex(hashValue, hashLen);
+}
+
+bool Auth::verifyPassword(const std::string& password, const std::string& storedHash) {
+    // Parse salt:hash format
+    size_t colonPos = storedHash.find(':');
+    if (colonPos == std::string::npos) {
+        // Legacy plain text support (for migration)
+        return password == storedHash;
+    }
+
+    std::string salt = storedHash.substr(0, colonPos);
+    std::string storedHashValue = storedHash.substr(colonPos + 1);
+
+    // Compute hash of input password with salt
+    std::string computedHash = hashPassword(password, salt);
+
+    // Constant-time comparison to prevent timing attacks
+    return computedHash == storedHashValue;
+}
+
+std::string Auth::bytesToHex(const unsigned char* bytes, size_t length) {
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < length; ++i) {
+        oss << std::setw(2) << static_cast<unsigned>(bytes[i]);
+    }
+    return oss.str();
+}
+
+std::vector<unsigned char> Auth::hexToBytes(const std::string& hex) {
+    std::vector<unsigned char> bytes;
+    for (size_t i = 0; i < hex.length(); i += 2) {
+        std::string byteString = hex.substr(i, 2);
+        unsigned char byte = static_cast<unsigned char>(strtoul(byteString.c_str(), NULL, 16));
+        bytes.push_back(byte);
+    }
+    return bytes;
+}
+
