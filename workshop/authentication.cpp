@@ -5,7 +5,6 @@
 #include <iomanip>
 #include <functional> // std::hash
 #include <sstream>
-#include <iomanip>
 
 Auth::Auth(DatabaseManager* db) : db(db) {}
 
