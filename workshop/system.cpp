@@ -52,19 +52,26 @@ void System::runApplication() {
         case 2:  // Vehicle Management
             manageVehicles();
             break;
+        case 3: // User Profile
+            updateUserProfile();
+            break;
         case 4: // Calculation History
             viewCalculationHistory();
             break;
-
-        case 5:  // User Profile
-            updateUserProfile();
-            break;
-        case 6:  // User Management (Admin-only)
+        case 5:  // User Management Menu
             if (currentRole == Auth::Role::ADMIN) {
                 userManagementMenu();
             }
             else {
-                std::cout << "Access denied: Admin privileges required.\n";
+                std::cout << "Invalid selection. Please try again.\n";
+            }
+            break;
+        case 6:  // Fuel
+            if (currentRole == Auth::Role::ADMIN) {
+                manageFuelPrice();
+            }
+            else {
+                std::cout << "Invalid selection: Please try again.\n";
             }
             break;
         case 99: // Exit
@@ -532,6 +539,8 @@ void System::changeUserRole() {
     }
 }
 
+
+// Log
 void System::deleteCalculationHistoryMenu() {
     std::cout << "\n=== DELETE CALCULATION HISTORY ===\n";
     std::cout << "Are you sure you want to delete ALL your calculation history? (y/n): ";

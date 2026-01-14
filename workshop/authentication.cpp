@@ -43,7 +43,7 @@ bool Auth::verify(const std::string& username, const std::string& password) {
         return false;
     }
 
-    char stored_hash[256];
+    char stored_hash[256] = {0};
     unsigned long hash_length = 0;
     MYSQL_BIND res_bind[1];
     memset(res_bind, 0, sizeof(res_bind));
@@ -167,7 +167,6 @@ bool Auth::registerUser(const std::string& username, const std::string& password
         std::string storedHash = salt + ":" + hashedPassword;
         bind[1].buffer = (char*)storedHash.c_str();
         bind[1].buffer_length = (unsigned long)storedHash.length();
-        bind[1].buffer_length = (unsigned long)password.length();
 
         std::string roleStr = roleToString(role);
         bind[2].buffer_type = MYSQL_TYPE_STRING;
@@ -259,8 +258,6 @@ bool Auth::updateUser(const std::string& currentUser, Role currentRole,const std
         std::string storedHash = salt + ":" + hashedPassword;
         bind[0].buffer = (char*)storedHash.c_str();
         bind[0].buffer_length = (unsigned long)storedHash.length();
-        bind[0].buffer_length = (unsigned long)newPassword.length();
-
         // Target username
         bind[1].buffer_type = MYSQL_TYPE_STRING;
         bind[1].buffer = (char*)targetUser.c_str();
@@ -409,41 +406,78 @@ bool Auth::listAllUsers(const std::string& adminUser, Role adminRole) {
         return false;
     }
 
-    MYSQL* conn = db->getConnection();
+    MYSQL_STMT* stmt = mysql_stmt_init(db->getConnection());
+    const char* query = "SELECT username, role FROM users ORDER BY username";
 
-    std::string query = "SELECT username, role FROM users ORDER BY username";
-
-    if (mysql_query(conn, query.c_str()) == 0) {
-        MYSQL_RES* res = mysql_store_result(conn);
-        if (res) {
-            std::cout << "\n=== All Registered Users ===\n";
-            std::cout << std::left << std::setw(20) << "Username"
-                << std::setw(10) << "Role"
-                << std::setw(10) << "Status"
-                << "\n";
-            std::cout << std::string(40, '-') << "\n";
-
-            MYSQL_ROW row;
-            while ((row = mysql_fetch_row(res))) {
-                std::string username = row[0] ? row[0] : "";
-                std::string roleStr = row[1] ? row[1] : "user";
-                std::string status = (username == adminUser) ? "(You)" : "";
-
-                std::cout << std::left << std::setw(20) << username
-                    << std::setw(10) << roleStr
-                    << std::setw(10) << status
-                    << "\n";
-            }
-
-            int count = mysql_num_rows(res);
-            std::cout << "\nTotal users: " << count << "\n";
-            mysql_free_result(res);
-            return true;
-        }
+    if (mysql_stmt_prepare(stmt, query, (unsigned long)strlen(query)) != 0) {
+        std::cerr << "Failed to prepare list users statement: "
+            << mysql_stmt_error(stmt) << std::endl;
+        mysql_stmt_close(stmt);
+        return false;
     }
 
-    std::cerr << "Failed to list users: " << mysql_error(conn) << std::endl;
-    return false;
+    if (mysql_stmt_execute(stmt) != 0) {
+        std::cerr << "Failed to execute list users statement: "
+            << mysql_stmt_error(stmt) << std::endl;
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    // Bind result columns
+    char username_buf[256];
+    char role_buf[10];
+    unsigned long username_len = 0;
+    unsigned long role_len = 0;
+
+    MYSQL_BIND res_bind[2];
+    memset(res_bind, 0, sizeof(res_bind));
+
+    res_bind[0].buffer_type = MYSQL_TYPE_STRING;
+    res_bind[0].buffer = username_buf;
+    res_bind[0].buffer_length = sizeof(username_buf);
+    res_bind[0].length = &username_len;
+
+    res_bind[1].buffer_type = MYSQL_TYPE_STRING;
+    res_bind[1].buffer = role_buf;
+    res_bind[1].buffer_length = sizeof(role_buf);
+    res_bind[1].length = &role_len;
+
+    if (mysql_stmt_bind_result(stmt, res_bind) != 0) {
+        std::cerr << "Failed to bind result: " << mysql_stmt_error(stmt) << std::endl;
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    // Store results
+    if (mysql_stmt_store_result(stmt) != 0) {
+        std::cerr << "Failed to store result: " << mysql_stmt_error(stmt) << std::endl;
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    std::cout << "\n=== All Registered Users ===\n";
+    std::cout << std::left << std::setw(20) << "Username"
+        << std::setw(10) << "Role"
+        << std::setw(10) << "Status"
+        << "\n";
+    std::cout << std::string(40, '-') << "\n";
+
+    int count = 0;
+    while (mysql_stmt_fetch(stmt) == 0) {
+        std::string username(username_buf, username_len);
+        std::string roleStr(role_buf, role_len);
+        std::string status = (username == adminUser) ? "(You)" : "";
+
+        std::cout << std::left << std::setw(20) << username
+            << std::setw(10) << roleStr
+            << std::setw(10) << status
+            << "\n";
+        count++;
+    }
+
+    std::cout << "\nTotal users: " << count << "\n";
+    mysql_stmt_close(stmt);
+    return true;
 }
 
 bool Auth::changeUserRole(const std::string& adminUser, Role adminRole, const std::string& targetUser, Role newRole) {
